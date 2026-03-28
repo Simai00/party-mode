@@ -1,5 +1,7 @@
 # Party Mode 🎉 (Home Assistant Blueprint)
 
+[![Add this Blueprint to your Home Assistant](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fraw.githubusercontent.com%2FSimai00%2Fparty-mode%2Fmain%2Fparty_mode.yaml)
+
 A Home Assistant automation blueprint that turns any button press into a short party scene:
 
 - Plays a sound on selected speakers
