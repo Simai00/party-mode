@@ -1,0 +1,226 @@
+blueprint:
+  name: "Party Mode 🎉"
+  description: >
+    Triggers a party mode when a button is pressed (works with Aqara Mini Switch
+    via zigbee2mqtt, ZHA, or any other trigger).
+
+  domain: automation
+  author: "party-mode-blueprint"
+
+  input:
+
+    # ── Trigger ─────────────────────────────────────────────────────────────
+    party_trigger:
+      name: "Party Trigger"
+      description: >
+        The event that starts party mode. Works with any button or device —
+        Aqara Mini Switch (zigbee2mqtt or ZHA), other Zigbee/Z-Wave remotes,
+        virtual buttons, NFC tags, etc.
+        Configure the exact action (single press, double press, hold…) here.
+      selector:
+        trigger: {}
+
+    # ── Lights ──────────────────────────────────────────────────────────────
+    color_lights:
+      name: "Color Lights (RGB)"
+      description: >
+        RGB-capable lights that will flash in random colors.
+        Each light gets its own unique random color, and a random delay (300–800 ms)
+        is inserted between each light update — causing them to drift out of sync
+        over time and look truly chaotic.
+      selector:
+        entity:
+          domain: light
+          multiple: true
+
+    white_lights:
+      name: "White / Dimmable Lights (optional)"
+      description: >
+        Non-color lights. These will flash between different brightness levels.
+        Leave empty if you only have color lights.
+      default: []
+      selector:
+        entity:
+          domain: light
+          multiple: true
+
+    # ── Speakers ────────────────────────────────────────────────────────────
+    speakers:
+      name: "Smart Speakers / Media Players"
+      description: >
+        Speakers that will play the party sound. Their state will be saved
+        beforehand and a restore will be attempted afterwards (see note above
+        about media player restore reliability).
+      selector:
+        entity:
+          domain: media_player
+          multiple: true
+
+    party_sound_url:
+      name: "Party Sound URL"
+      description: >
+        Direct URL to an audio file (mp3, ogg, flac, etc.).
+
+        ▸ Self-hosted (recommended): Place the file in /config/www/ and use
+          http://YOUR_HA_IP:8123/local/your_file.mp3
+
+        ▸ Public URL: Any direct audio file URL works, but reliability depends
+          on the remote server and your network.
+
+        ▸ YouTube / Spotify links will NOT work — you need a direct file URL.
+      default: "http://homeassistant.local:8123/local/rickroll.mp3"
+      selector:
+        text: {}
+
+    party_volume:
+      name: "Party Volume"
+      description: >
+        Volume level for all speakers during party mode (0.0 = mute, 1.0 = max).
+        The original volume will be restored together with the scene at the end.
+      default: 1.0
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.05
+          mode: slider
+
+    # ── Duration ────────────────────────────────────────────────────────────
+    party_duration:
+      name: "Party Duration"
+      description: >
+        Approximate duration of the party (in seconds) before everything is restored.
+        Actual runtime is slightly longer with more lights, because staggered random
+        delays between light updates add up each cycle.
+      default: 20
+      selector:
+        number:
+          min: 4
+          max: 300
+          step: 2
+          unit_of_measurement: "seconds"
+
+# ── Variables ────────────────────────────────────────────────────────────────
+variables:
+  color_lights: !input color_lights
+  white_lights: !input white_lights
+  speakers: !input speakers
+  party_duration: !input party_duration
+  # All entities to snapshot — lights + speakers
+  snapshot_entities: "{{ color_lights + white_lights + speakers }}"
+  # Number of outer flash cycles.
+  # Each cycle loops through every light with a 300–800 ms random delay between each.
+  # With avg ~550 ms inter-light delay: cycle_time ≈ num_lights × 0.55s.
+  # flash_cycles = party_duration / 2 gives roughly the right total for 3–5 lights.
+  # Adjust if you have many more lights and find the party runs too long.
+  flash_cycles: "{{ (party_duration / 2) | int }}"
+
+# ── Trigger ──────────────────────────────────────────────────────────────────
+trigger: !input party_trigger
+
+# Single mode: ignore new triggers while party is running.
+# Change to "restart" if you want re-pressing the button to restart the party.
+mode: single
+max_exceeded: silent
+
+# ── Actions ──────────────────────────────────────────────────────────────────
+action:
+
+  # ── 1. Save current state of all lights and speakers ─────────────────────
+  - alias: "Save current state"
+    action: scene.create
+    data:
+      scene_id: party_mode_before
+      snapshot_entities: "{{ snapshot_entities }}"
+
+  # ── 2. Set volume on all speakers ────────────────────────────────────────
+  - alias: "Set party volume"
+    action: media_player.volume_set
+    target:
+      entity_id: "{{ speakers }}"
+    data:
+      volume_level: !input party_volume
+
+  # ── 3. Play party sound on all speakers ──────────────────────────────────
+  - alias: "Play party sound"
+    action: media_player.play_media
+    target:
+      entity_id: "{{ speakers }}"
+    data:
+      media_content_id: !input party_sound_url
+      media_content_type: music
+
+  # ── 4. Flash lights for the configured duration ───────────────────────────
+  - alias: "Flash lights"
+    repeat:
+      count: "{{ flash_cycles }}"
+      sequence:
+
+        # Each color light gets its own unique random color.
+        # A random delay of 300–800 ms is inserted after each light update,
+        # causing the lights to visually drift out of sync with each other.
+        # The delay is re-evaluated each iteration, so no two cycles are the same.
+        - alias: "Each color light: individual random color + random stagger delay"
+          repeat:
+            for_each: "{{ color_lights }}"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ repeat.item }}"
+                data:
+                  hs_color:
+                    - "{{ range(0, 360) | random }}"   # unique random hue per light
+                    - "{{ range(75, 100) | random }}"  # high saturation for vivid color
+                  brightness: 255
+                  transition: 0
+              # Random stagger delay — this is what desynchronizes the lights.
+              # Re-evaluated each time, so each light waits a different amount.
+              - delay:
+                  milliseconds: "{{ range(80, 200) | random }}"
+
+        # White / dimmable lights each get their own random brightness level.
+        - alias: "Each white light: individual random brightness + stagger delay"
+          if:
+            - condition: template
+              value_template: "{{ white_lights | length > 0 }}"
+          then:
+            - repeat:
+                for_each: "{{ white_lights }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ repeat.item }}"
+                    data:
+                      brightness: "{{ [50, 100, 150, 200, 255] | random }}"
+                      transition: 0
+                  - delay:
+                      milliseconds: "{{ range(60, 180) | random }}"
+
+  # ── 5. Restore everything to its original state ───────────────────────────
+  # Wait before restoring to let any in-flight Zigbee commands settle.
+  # Without this, the last flash command can arrive AFTER the scene restore
+  # and leave a light stuck on.
+  - alias: "Wait for in-flight Zigbee commands to settle"
+    delay:
+      milliseconds: 800
+
+  # Apply the scene once...
+  - alias: "Restore original state (first apply)"
+    action: scene.turn_on
+    target:
+      entity_id: scene.party_mode_before
+    data:
+      transition: 1
+
+  # ...and a second time after a short gap, to catch any light that was still
+  # processing a flash command when the first restore fired.
+  - alias: "Wait and re-apply to catch stragglers"
+    delay:
+      milliseconds: 1500
+
+  - alias: "Restore original state (second apply)"
+    action: scene.turn_on
+    target:
+      entity_id: scene.party_mode_before
+    data:
+      transition: 1
